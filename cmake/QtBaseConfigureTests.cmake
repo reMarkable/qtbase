@@ -38,8 +38,9 @@ function(qt_run_config_test_architecture)
     set(_arch_file_suffix "${CMAKE_EXECUTABLE_SUFFIX}")
     # With emscripten the application entry point is a .js file (to be run with node for example),
     # but the real "data" is in the .wasm file, so that's where we need to look for the ABI, etc.
-    # information.
-    if (WASM)
+    # information. On WASI the executable itself is the .wasm file; CMAKE_EXECUTABLE_SUFFIX is
+    # cleared by CMakeGenericSystem, so the suffix has to be spelled out here as well.
+    if (WASM OR WASI)
         set(_arch_file_suffix ".wasm")
     endif()
 
