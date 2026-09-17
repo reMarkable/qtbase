@@ -16,6 +16,7 @@
 //
 
 #include <QtGui/private/qtguiglobal_p.h>
+#include <QtCore/qhash.h>
 #include "private/qfontengine_p.h"
 
 QT_BEGIN_NAMESPACE
@@ -40,16 +41,18 @@ public:
 #ifndef QT_NO_PDF
     QByteArray widthArray() const;
     QByteArray createToUnicodeMap() const;
-    QList<int> getReverseMap() const;
 
     static QByteArray glyphName(unsigned short unicode, bool symbol);
 
-    qsizetype addGlyph(uint index);
+    qsizetype addGlyph(uint index, QStringView text = {});
 #endif
     const uint object_id;
     bool noEmbed;
     QFontEngine *fontEngine;
+    // glyph_indices may repeat a glyph: one entry per distinct text
     QList<uint> glyph_indices;
+    QList<QString> glyph_texts;
+    QMultiHash<uint, qsizetype> glyph_map;
     mutable int downloaded_glyphs;
     mutable bool standard_font;
     qsizetype nGlyphs() const { return glyph_indices.size(); }

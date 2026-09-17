@@ -744,6 +744,16 @@ const char *QPdf::toHex(uchar u, char *buffer)
     return buffer;
 }
 
+QByteArray QPdf::toHex(QStringView str)
+{
+    QByteArray hex;
+    hex.reserve(4 * str.size());
+    char buf[5];
+    for (QChar c : str)
+        hex += QPdf::toHex(ushort(c.unicode()), buf);
+    return hex;
+}
+
 
 QPdfPage::QPdfPage()
     : QPdf::ByteStream(true) // Enable file backing
@@ -3368,6 +3378,46 @@ int QPdfEnginePrivate::addImage(const QImage &img, bool *bitmap, bool lossless, 
     return object;
 }
 
+static void buildTextMapping(const QTextItemInt &ti, const QVarLengthArray<int> &sourceIndices,
+                             QVarLengthArray<QStringView> &glyphText,
+                             QVarLengthArray<int> &glyphSpan, QVarLengthArray<QStringView> &spanTexts)
+{
+    const unsigned short *logClusters = ti.logClusters;
+    const int numGlyphs = ti.glyphs.numGlyphs;
+    if (!logClusters || !ti.chars || ti.num_chars <= 0 || numGlyphs <= 0)
+        return;
+
+    const int clusterOffset = logClusters[0];
+    int k = 0;
+    int pos = 0;
+    do {
+        int end = pos + 1;
+        while (end < ti.num_chars && logClusters[end] == logClusters[pos])
+            ++end;
+
+        const int gs = qBound(0, logClusters[pos] - clusterOffset, numGlyphs);
+        const int ge = end == ti.num_chars ? numGlyphs
+                                           : qBound(gs, logClusters[end] - clusterOffset, numGlyphs);
+
+        while (k < sourceIndices.size() && sourceIndices[k] < gs)
+            ++k;
+        const int ks = k;
+        while (k < sourceIndices.size() && sourceIndices[k] < ge)
+            ++k;
+        const int ke = k;
+
+        // ToUnicode maps one code to a string, so it covers n chars per glyph but not the reverse
+        if (ke == ks + 1) {
+            glyphText[ks] = QStringView(ti.chars + pos, end - pos);
+        } else if (ke > ks) {
+            for (int j = ks; j < ke; ++j)
+                glyphSpan[j] = int(spanTexts.size());
+            spanTexts.append(QStringView(ti.chars + pos, end - pos));
+        }
+        pos = end;
+    } while (pos < ti.num_chars);
+}
+
 void QPdfEnginePrivate::drawTextItem(const QPointF &p, const QTextItemInt &ti)
 {
     Q_Q(QPdfEngine);
@@ -3472,9 +3522,10 @@ void QPdfEnginePrivate::drawTextItem(const QPointF &p, const QTextItemInt &ti)
 
     QVarLengthArray<glyph_t> glyphs;
     QVarLengthArray<QFixedPoint> positions;
+    QVarLengthArray<int> sourceIndices;
     QTransform m = QTransform::fromTranslate(p.x(), p.y());
     ti.fontEngine->getGlyphPositions(ti.glyphs, m, ti.flags,
-                                     glyphs, positions);
+                                     glyphs, positions, &sourceIndices);
     if (glyphs.size() == 0)
         return;
     int synthesized = ti.fontEngine->synthesized();
@@ -3488,67 +3539,52 @@ void QPdfEnginePrivate::drawTextItem(const QPointF &p, const QTextItemInt &ti)
                                 : "0 0 -1 0 0 Tm\n");
 
 
-#if 0
-    // #### implement actual text for complex languages
-    const unsigned short *logClusters = ti.logClusters;
-    int pos = 0;
-    do {
-        int end = pos + 1;
-        while (end < ti.num_chars && logClusters[end] == logClusters[pos])
-            ++end;
-        *currentPage << "/Span << /ActualText <FEFF";
-        for (int i = pos; i < end; ++i) {
-            s << toHex((ushort)ti.chars[i].unicode(), buf);
-        }
-        *currentPage << "> >>\n"
-            "BDC\n"
-            "<";
-        int ge = end == ti.num_chars ? ti.num_glyphs : logClusters[end];
-        for (int gs = logClusters[pos]; gs < ge; ++gs)
-            *currentPage << toHex((ushort)ti.glyphs[gs].glyph, buf);
-        *currentPage << "> Tj\n"
-            "EMC\n";
-        pos = end;
-    } while (pos < ti.num_chars);
-#else
-    qreal last_x = 0.;
-    qreal last_y = 0.;
-    for (int i = 0; i < glyphs.size(); ++i) {
-        qreal x = positions[i].x.toReal();
-        qreal y = positions[i].y.toReal();
-        if (synthesized & QFontEngine::SynthesizedItalic)
-            x += .3*y;
-        x /= stretch;
-        char buf[5];
-        qsizetype g = font->addGlyph(glyphs[i]);
-        *currentPage << x - last_x << last_y - y << "Td <"
-                     << QPdf::toHex((ushort)g, buf) << "> Tj\n";
-        last_x = x;
-        last_y = y;
-    }
-    if (synthesized & QFontEngine::SynthesizedBold) {
-        *currentPage << stretch << (synthesized & QFontEngine::SynthesizedItalic
-                            ? "0 .3 -1 0 0 Tm\n"
-                            : "0 0 -1 0 0 Tm\n");
-        *currentPage << "/Span << /ActualText <> >> BDC\n";
-        last_x = 0.5*fe->lineThickness().toReal();
-        last_y = 0.;
+    QVarLengthArray<QStringView> glyphText(glyphs.size(), QStringView());
+    QVarLengthArray<int> glyphSpan(glyphs.size(), -1);
+    QVarLengthArray<QStringView> spanTexts;
+    buildTextMapping(ti, sourceIndices, glyphText, glyphSpan, spanTexts);
+
+    auto emitGlyphs = [&](qreal last_x, bool withSpans) {
+        qreal last_y = 0.;
+        int openSpan = -1;
         for (int i = 0; i < glyphs.size(); ++i) {
+            if (withSpans && glyphSpan[i] != openSpan) {
+                if (openSpan >= 0)
+                    *currentPage << "EMC\n";
+                openSpan = glyphSpan[i];
+                if (openSpan >= 0) {
+                    *currentPage << "/Span << /ActualText <FEFF"
+                                 << QPdf::toHex(spanTexts.at(openSpan)) << "> >>\nBDC\n";
+                }
+            }
             qreal x = positions[i].x.toReal();
             qreal y = positions[i].y.toReal();
             if (synthesized & QFontEngine::SynthesizedItalic)
                 x += .3*y;
             x /= stretch;
             char buf[5];
-            qsizetype g = font->addGlyph(glyphs[i]);
+            qsizetype g = font->addGlyph(glyphs[i], glyphText[i]);
             *currentPage << x - last_x << last_y - y << "Td <"
-                        << QPdf::toHex((ushort)g, buf) << "> Tj\n";
+                         << QPdf::toHex((ushort)g, buf) << "> Tj\n";
             last_x = x;
             last_y = y;
         }
+        if (openSpan >= 0)
+            *currentPage << "EMC\n";
+    };
+
+    // ActualText needs a Span tag, which is PDF 1.5 and later
+    emitGlyphs(0., pdfVersion >= QPdfEngine::Version_1_6);
+
+    if (synthesized & QFontEngine::SynthesizedBold) {
+        *currentPage << stretch << (synthesized & QFontEngine::SynthesizedItalic
+                            ? "0 .3 -1 0 0 Tm\n"
+                            : "0 0 -1 0 0 Tm\n");
+        // the empty ActualText hides this pass from extraction; spans inside it would not apply
+        *currentPage << "/Span << /ActualText <> >> BDC\n";
+        emitGlyphs(0.5*fe->lineThickness().toReal(), false);
         *currentPage << "EMC\n";
     }
-#endif
 
     *currentPage << "ET\n";
 }

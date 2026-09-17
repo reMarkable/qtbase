@@ -102,6 +102,7 @@ namespace QPdf {
 
     const char *toHex(ushort u, char *buffer);
     const char *toHex(uchar u, char *buffer);
+    QByteArray toHex(QStringView str);
 
 }
 

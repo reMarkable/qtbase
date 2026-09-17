@@ -146,20 +146,23 @@ static void checkRanges(QPdf::ByteStream &ts, QByteArray &ranges, int &nranges)
     }
 }
 
-QList<int> QFontSubset::getReverseMap() const
-{
-    QList<int> reverseMap(0x10000, 0);
-    for (uint uc = 0; uc < 0x10000; ++uc) {
-        auto idx = glyph_indices.indexOf(fontEngine->glyphIndex(uc));
-        if (idx >= 0 && !reverseMap.at(idx))
-            reverseMap[idx] = uc;
-    }
-    return reverseMap;
-}
-
 QByteArray QFontSubset::createToUnicodeMap() const
 {
-    QList<int> reverseMap = getReverseMap();
+    Q_ASSERT(glyph_texts.size() == glyph_indices.size());
+    QHash<uint, char16_t> firstChar;
+    for (uint uc = 0; uc < 0x10000; ++uc) {
+        if (const uint glyph = fontEngine->glyphIndex(uc))
+            firstChar.tryEmplace(glyph, char16_t(uc));
+    }
+
+    QList<QString> texts(nGlyphs());
+    for (qsizetype i = 0; i < nGlyphs(); ++i) {
+        texts[i] = glyph_texts.at(i).left(256); // 512 bytes max, PDF 32000-1 9.10.3
+        if (texts.at(i).isEmpty()) {
+            if (const char16_t uc = firstChar.value(glyph_indices.at(i)))
+                texts[i] = QChar(uc);
+        }
+    }
 
     QByteArray touc;
     QPdf::ByteStream ts(&touc);
@@ -179,8 +182,8 @@ QByteArray QFontSubset::createToUnicodeMap() const
 
     char buf[5];
     for (qsizetype g = 1; g < nGlyphs(); ) {
-        int uc0 = reverseMap.at(g);
-        if (!uc0) {
+        QStringView uc0 = texts.at(g);
+        if (uc0.isEmpty()) {
             ++g;
             continue;
         }
@@ -188,11 +191,11 @@ QByteArray QFontSubset::createToUnicodeMap() const
         qsizetype startLinear = 0;
         ++g;
         while (g < nGlyphs()) {
-            int uc = reverseMap[g];
+            QStringView uc = texts.at(g);
             // cmaps can't have the high byte changing within one range, so we need to break on that as well
-            if (!uc || (g>>8) != (start >> 8))
+            if (uc.isEmpty() || (g>>8) != (start >> 8))
                 break;
-            if (uc == uc0 + 1) {
+            if (uc.size() == 1 && uc0.size() == 1 && uc[0].unicode() == uc0[0].unicode() + 1) {
                 if (!startLinear)
                     startLinear = g - 1;
             } else {
@@ -212,11 +215,11 @@ QByteArray QFontSubset::createToUnicodeMap() const
             s << '<' << QPdf::toHex((ushort)start, buf) << "> <";
             s << QPdf::toHex((ushort)(endnonlinear - 1), buf) << "> ";
             if (endnonlinear == start + 1) {
-                s << '<' << QPdf::toHex((ushort)reverseMap[start], buf) << ">\n";
+                s << '<' << QPdf::toHex(texts.at(start)) << ">\n";
             } else {
                 s << '[';
                 for (qsizetype i = start; i < endnonlinear; ++i) {
-                    s << '<' << QPdf::toHex((ushort)reverseMap[i], buf) << "> ";
+                    s << '<' << QPdf::toHex(texts.at(i)) << "> ";
                 }
                 s << "]\n";
             }
@@ -225,13 +228,13 @@ QByteArray QFontSubset::createToUnicodeMap() const
         if (startLinear) {
             while (startLinear < g) {
                 qsizetype len = g - startLinear;
-                qsizetype uc_start = reverseMap[startLinear];
+                qsizetype uc_start = texts.at(startLinear).at(0).unicode();
                 qsizetype uc_end = uc_start + len - 1;
                 if ((uc_end >> 8) != (uc_start >> 8))
                     len = 256 - (uc_start & 0xff);
                 s << '<' << QPdf::toHex((ushort)startLinear, buf) << "> <";
                 s << QPdf::toHex((ushort)(startLinear + len - 1), buf) << "> ";
-                s << '<' << QPdf::toHex((ushort)reverseMap[startLinear], buf) << ">\n";
+                s << '<' << QPdf::toHex((ushort)uc_start, buf) << ">\n";
                 checkRanges(ts, ranges, nranges);
                 startLinear += len;
             }
@@ -249,13 +252,25 @@ QByteArray QFontSubset::createToUnicodeMap() const
     return touc;
 }
 
-qsizetype QFontSubset::addGlyph(uint index)
+qsizetype QFontSubset::addGlyph(uint index, QStringView text)
 {
-    qsizetype idx = glyph_indices.indexOf(index);
-    if (idx < 0) {
-        idx = glyph_indices.size();
-        glyph_indices.append(index);
-    }
+    const auto find = [this, index](QStringView t) -> qsizetype {
+        for (auto it = glyph_map.constFind(index); it != glyph_map.cend() && it.key() == index; ++it) {
+            if (glyph_texts.at(*it) == t)
+                return *it;
+        }
+        return -1;
+    };
+    if (const qsizetype idx = find(text); idx >= 0)
+        return idx;
+
+    if (glyph_indices.size() >= 0xffff) // 'maxp' numGlyphs is a quint16
+        return qMax(find({}), qsizetype(0));
+
+    const qsizetype idx = glyph_indices.size();
+    glyph_map.insert(index, idx);
+    glyph_indices.append(index);
+    glyph_texts.append(text.toString());
     return idx;
 }
 

@@ -261,7 +261,8 @@ bool QFontEngine::expectsGammaCorrectedBlending() const
 }
 
 void QFontEngine::getGlyphPositions(const QGlyphLayout &glyphs, const QTransform &matrix, QTextItem::RenderFlags flags,
-                                    QVarLengthArray<glyph_t> &glyphs_out, QVarLengthArray<QFixedPoint> &positions)
+                                    QVarLengthArray<glyph_t> &glyphs_out, QVarLengthArray<QFixedPoint> &positions,
+                                    QVarLengthArray<int> *sourceIndices)
 {
     QFixed xpos;
     QFixed ypos;
@@ -276,6 +277,8 @@ void QFontEngine::getGlyphPositions(const QGlyphLayout &glyphs, const QTransform
     }
 
     int current = 0;
+    if (sourceIndices)
+        sourceIndices->clear();
     if (flags & QTextItem::RightToLeft) {
         int i = glyphs.numGlyphs;
         int totalKashidas = 0;
@@ -307,6 +310,8 @@ void QFontEngine::getGlyphPositions(const QGlyphLayout &glyphs, const QTransform
             positions[current].x = gpos_x;
             positions[current].y = gpos_y;
             glyphs_out[current] = glyphs.glyphs[i];
+            if (sourceIndices)
+                sourceIndices->append(i);
             ++current;
             if (glyphs.justifications[i].nKashidas) {
                 QChar ch = u'\x640'; // Kashida character
@@ -334,6 +339,8 @@ void QFontEngine::getGlyphPositions(const QGlyphLayout &glyphs, const QTransform
                     positions[current].x = gpos_x;
                     positions[current].y = gpos_y;
                     glyphs_out[current] = kashidaGlyph;
+                    if (sourceIndices)
+                        sourceIndices->append(i);
                     ++current;
                 }
             } else {
@@ -351,6 +358,8 @@ void QFontEngine::getGlyphPositions(const QGlyphLayout &glyphs, const QTransform
                     positions[current].x = xpos + glyphs.offsets[i].x;
                     positions[current].y = ypos + glyphs.offsets[i].y;
                     glyphs_out[current] = glyphs.glyphs[i];
+                    if (sourceIndices)
+                        sourceIndices->append(i);
                     xpos += glyphs.advances[i] + QFixed::fromFixed(glyphs.justifications[i].space_18d6);
                     ++current;
                 }
@@ -366,6 +375,8 @@ void QFontEngine::getGlyphPositions(const QGlyphLayout &glyphs, const QTransform
                     positions[current].x = QFixed::fromReal(gpos.x());
                     positions[current].y = QFixed::fromReal(gpos.y());
                     glyphs_out[current] = glyphs.glyphs[i];
+                    if (sourceIndices)
+                        sourceIndices->append(i);
                     xpos += glyphs.advances[i] + QFixed::fromFixed(glyphs.justifications[i].space_18d6);
                     ++current;
                 }
